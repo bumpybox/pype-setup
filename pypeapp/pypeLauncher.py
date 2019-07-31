@@ -87,10 +87,10 @@ class PypeLauncher(object):
         import acre
         os.environ['PLATFORM'] = platform.system().lower()
         tools_env = acre.get_tools(tools)
-        env = acre.compute(dict(tools_env), cleanup=False)
+        env = acre.compute(dict(tools_env), cleanup=True)
         env = acre.merge(env, dict(os.environ))
         os.environ = acre.append(dict(os.environ), env)
-        os.environ = acre.compute(os.environ, cleanup=False)
+        os.environ = acre.compute(os.environ, cleanup=True)
 
     def launch_tray(self, debug=False):
         """ Method will launch tray.py
