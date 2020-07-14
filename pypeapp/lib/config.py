@@ -1,11 +1,141 @@
 import os
 import json
+import datetime
 from .log import PypeLogger
 
 log = PypeLogger().get_logger(__name__)
 
 
-def collect_json_from_path(input_path):
+def get_datetime_data(datetime_obj=None):
+    """Returns current datetime data as dictionary.
+
+    :param datetime_obj: may return data for specific datetime object
+    :type datetime_obj: datetime, optional
+    :return: prepared date & time data
+    :rtype: dict
+
+    Available keys:
+    "d" - <Day of month number> in shortest possible way.
+    "dd" - <Day of month number> with 2 digits.
+    "ddd" - <Week day name> shortened week day. e.g.: `Mon`, ...
+    "dddd" - <Week day name> full name of week day. e.g.: `Monday`, ...
+    "m" - <Month number> in shortest possible way. e.g.: `1` if January
+    "mm" - <Month number> with 2 digits.
+    "mmm" - <Month name> shortened month name. e.g.: `Jan`, ...
+    "mmmm" - <Month name> full month name. e.g.: `January`, ...
+    "yy" - <Year number> shortened year. e.g.: `19`, `20`, ...
+    "yyyy" - <Year number> full year. e.g.: `2019`, `2020`, ...
+    "H" - <Hours number 24-hour> shortened hours.
+    "HH" - <Hours number 24-hour> with 2 digits.
+    "h" - <Hours number 12-hour> shortened hours.
+    "hh" - <Hours number 12-hour> with 2 digits.
+    "ht" - <Midday type> AM or PM.
+    "M" - <Minutes number> shortened minutes.
+    "MM" - <Minutes number> with 2 digits.
+    "S" - <Seconds number> shortened seconds.
+    "SS" - <Seconds number> with 2 digits.
+    """
+
+    if not datetime_obj:
+        datetime_obj = datetime.datetime.now()
+
+    year = datetime_obj.strftime("%Y")
+
+    month = datetime_obj.strftime("%m")
+    month_name_full = datetime_obj.strftime("%B")
+    month_name_short = datetime_obj.strftime("%b")
+    day = datetime_obj.strftime("%d")
+
+    weekday_full = datetime_obj.strftime("%A")
+    weekday_short = datetime_obj.strftime("%a")
+
+    hours = datetime_obj.strftime("%H")
+    hours_midday = datetime_obj.strftime("%I")
+    hour_midday_type = datetime_obj.strftime("%p")
+    minutes = datetime_obj.strftime("%M")
+    seconds = datetime_obj.strftime("%S")
+
+    return {
+        "d": str(int(day)),
+        "dd": str(day),
+        "ddd": weekday_short,
+        "dddd": weekday_full,
+        "m": str(int(month)),
+        "mm": str(month),
+        "mmm": month_name_short,
+        "mmmm": month_name_full,
+        "yy": str(year[2:]),
+        "yyyy": str(year),
+        "H": str(int(hours)),
+        "HH": str(hours),
+        "h": str(int(hours_midday)),
+        "hh": str(hours_midday),
+        "ht": hour_midday_type,
+        "M": str(int(minutes)),
+        "MM": str(minutes),
+        "S": str(int(seconds)),
+        "SS": str(seconds),
+    }
+
+
+def load_json(fpath, first_run=False):
+    # Load json data
+    with open(fpath, "r") as opened_file:
+        lines = opened_file.read().splitlines()
+
+    # prepare json string
+    standard_json = ""
+    for line in lines:
+        # Remove all whitespace on both sides
+        line = line.strip()
+
+        # Skip blank lines
+        if len(line) == 0:
+            continue
+
+        standard_json += line
+
+    # Check if has extra commas
+    extra_comma = False
+    if ",]" in standard_json or ",}" in standard_json:
+        extra_comma = True
+    standard_json = standard_json.replace(",]", "]")
+    standard_json = standard_json.replace(",}", "}")
+
+    if extra_comma and first_run:
+        log.error("Extra comma in json file: \"{}\"".format(fpath))
+
+    # return empty dict if file is empty
+    if standard_json == "":
+        if first_run:
+            log.error("Empty json file: \"{}\"".format(fpath))
+        return {}
+
+    # Try to parse string
+    try:
+        return json.loads(standard_json)
+
+    except json.decoder.JSONDecodeError:
+        # Return empty dict if it is first time that decode error happened
+        if not first_run:
+            return {}
+
+    # Repreduce the exact same exception but traceback contains better
+    # information about position of error in the loaded json
+    try:
+        with open(fpath, "r") as opened_file:
+            json.load(opened_file)
+
+    except json.decoder.JSONDecodeError:
+        log.warning(
+            "File has invalid json format \"{}\"".format(fpath),
+            exc_info=True
+        )
+
+    return {}
+
+
+def collect_json_from_path(input_path, first_run=False):
     r""" Json collector
     iterate through all subfolders and json files in *input_path*
 
@@ -27,36 +157,22 @@ def collect_json_from_path(input_path):
         for file in os.listdir(input_path):
             full_path = os.path.sep.join([input_path, file])
             if os.path.isdir(full_path):
-                loaded = collect_json_from_path(full_path)
+                loaded = collect_json_from_path(full_path, first_run)
                 if loaded:
                     output[file] = loaded
             else:
                 basename, ext = os.path.splitext(os.path.basename(file))
                 if ext == '.json':
-                    try:
-                        with open(full_path, "r") as f:
-                            output[basename] = json.load(f)
-                    except json.decoder.JSONDecodeError:
-                        log.warning(
-                            'File "{}" has .json syntax error'.format(file)
-                        )
-                        output[basename] = {}
+                    output[basename] = load_json(full_path, first_run)
     else:
         basename, ext = os.path.splitext(os.path.basename(input_path))
         if ext == '.json':
-            try:
-                with open(input_path, "r") as f:
-                    output = json.load(f)
-            except json.decoder.JSONDecodeError:
-                log.warning(
-                    'File "{}" has .json syntax error'.format(file)
-                )
-                output[basename] = {}
+            output = load_json(input_path, first_run)
 
     return output
 
 
-def get_presets(project=None):
+def get_presets(project=None, first_run=False):
     """ Loads preset files with usage of 'collect_json_from_path'
     Default preset path is set to: ``{PYPE_CONFIG}/presets``
     Project preset path is set to: ``{PYPE_PROJECT_CONFIGS}/*project_name*``
@@ -85,7 +201,7 @@ def get_presets(project=None):
     if not os.path.isdir(config_path):
         log.error('Preset path was not found: "{}"'.format(config_path))
         return None
-    default_data = collect_json_from_path(config_path)
+    default_data = collect_json_from_path(config_path, first_run)
 
     if not project:
         project = os.environ.get('AVALON_PROJECT', None)
@@ -103,10 +219,10 @@ def get_presets(project=None):
 
     if not os.path.isdir(project_config_path):
         log.warning('Preset path for project {} not found: "{}"'.format(
-            project, config_path
+            project, project_config_path
         ))
         return default_data
-    project_data = collect_json_from_path(project_config_path)
+    project_data = collect_json_from_path(project_config_path, first_run)
 
     return update_dict(default_data, project_data)
 

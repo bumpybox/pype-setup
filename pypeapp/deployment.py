@@ -21,9 +21,12 @@ import requests
 import tempfile
 import tarfile
 import zipfile
+import shutil
+import hashlib
+from six.moves.urllib.request import urlopen
+
 from pypeapp import Logger
 from pypeapp.lib.Terminal import Terminal
-import shutil
 
 
 class DeployException(Exception):
@@ -189,6 +192,7 @@ class Deployment(object):
         import git
         settings = self._determine_deployment_file()
         deploy = self._read_deployment_file(settings)
+        term = Terminal()
         if (not self._validate_schema(deploy)):
             raise DeployException(
                 "Invalid deployment file [ {} ]".format(settings), 200)
@@ -197,6 +201,8 @@ class Deployment(object):
         for ritem in deploy.get('repositories'):
             test_path = os.path.join(
                 self._pype_root, "repos", ritem.get('name'))
+
+            term.echo("  - validating [ {} ]".format(ritem.get('name')))
             # does repo directory exist?
             if not self._validate_is_directory(test_path):
                 if skip:
@@ -245,7 +251,7 @@ class Deployment(object):
                         ), 220)
             # check tag
             if ritem.get('tag'):
-                if self._validate_is_tag(test_path, ritem.get('tag')):
+                if not self._validate_is_tag(test_path, ritem.get('tag')):
                     raise DeployException(
                         'repo {0} head is not on tag {1}'.format(
                             ritem.get('name'),
@@ -342,7 +348,6 @@ class Deployment(object):
         import git
         repo = git.Repo(path)
         if str(repo.active_branch) != str(branch):
-            print("{} != {}".format(repo.active_branch, branch))
             return False
         return True
 
@@ -374,14 +379,10 @@ class Deployment(object):
         """
         import git
         # get tag
-        head = git.Repo(path).heads[0]
-        tags = head.tags
-        tag = next(
-            rtag for rtag in tags
-            if rtag["tag"] == tag)
-        if tag.commit.hexsha != head.commit.hexsha:
+        repo = git.Git(path)
+        rtag = repo.describe('--tags')
+        if rtag != tag:
             return False
-
         return True
 
     def _validate_origin(self, path: str, origin: str) -> bool:
@@ -505,21 +506,38 @@ class Deployment(object):
                              " worktree").format(path), 300)
 
                     # are we on correct branch?
-                    if not self._validate_is_branch(path,
-                        ritem.get('branch') or ritem.get('tag')):  # noqa: E128
+                    if not ritem.get('tag'):
+                        if not self._validate_is_branch(path,
+                                                        ritem.get('branch')):
 
-                        term.echo("  . switching to [ {} ] ...".format(
-                            ritem.get('branch') or ritem.get('tag')
-                        ))
-                        branch = repo.create_head(
-                                    ritem.get('branch') or ritem('tag'),
-                                    'HEAD')
+                            term.echo("  . switching to [ {} ] ...".format(
+                                ritem.get('branch')
+                            ))
+                            branch = repo.create_head(
+                                        ritem.get('branch'),
+                                        'HEAD')
 
-                        branch.checkout(force=force)
+                            branch.checkout(force=force)
 
                     # update repo
                     term.echo("  . updating ...")
-                    repo.remotes.origin.pull()
+                    repo.remotes.origin.fetch(tags=True, force=True)
+                    # build refspec
+                    if ritem.get('branch'):
+                        refspec = "refs/heads/{}".format(ritem.get('branch'))
+                        repo.remotes.origin.pull(refspec)
+                    elif ritem.get('tag'):
+                        tags = repo.tags
+                        if ritem.get('tag') not in tags:
+                            raise DeployException(
+                                ("Tag {} is missing on remote "
+                                 "origin").format(ritem.get('tag')))
+                        t = tags[ritem.get('tag')]
+                        term.echo(
+                            "  . tag: [{}, {} / {}]".format(
+                                t.name, t.commit, t.commit.committed_date))
+                        repo.remotes.origin.pull(ritem.get('tag'))
+
             else:
                 # path doesn't exist, clone
                 try:
@@ -558,16 +576,37 @@ class Deployment(object):
                 archive_file_path = tempfile.mkdtemp(basename + '_archive')
                 archive_file_path = os.path.join(archive_file_path, filename)
 
-                term.echo("  - downloading [ {} ]".format(item.get("url")))
-                success = self._download_file(
-                    item.get("url"), archive_file_path
-                )
+                if item.get("vendor"):
+                    source = os.path.join(
+                                os.environ.get("PYPE_ROOT"),
+                                'vendor', 'packages', item.get("vendor"))
+                    if not os.path.isfile(source):
+                        raise DeployException(
+                            "Local archive {} doesn't exist".format(source)
+                        )
+                    shutil.copyfile(source, archive_file_path)
 
-                if not success:
-                    raise DeployException(
-                        "Failed to download [ {} ]".format(item.get("url")), 130  # noqa: E501
+                if item.get("url"):
+                    term.echo("  - downloading [ {} ]".format(item.get("url")))
+                    success = self._download_file(
+                        item.get("url"), archive_file_path
                     )
 
+                    if not success:
+                        raise DeployException(
+                            "Failed to download [ {} ]".format(item.get("url")), 130  # noqa: E501
+                        )
+
+                # checksum
+                if item.get('md5_url'):
+                    response = urlopen(item.get('md5_url'))
+                    md5 = response.read().decode('ascii').split(" ")[0]
+                    calc = self.calculate_checksum(archive_file_path)
+                    if md5 != calc:
+                        raise DeployException(
+                            "Checksum failed {} != {} on {}".format(
+                                md5, calc, archive_file_path)
+                        )
                 # Extract files from archive
                 if archive_type in ['zip']:
                     zip_file = zipfile.ZipFile(archive_file_path)
@@ -586,8 +625,14 @@ class Deployment(object):
                         tar_type = 'r:bz2'
                     else:
                         tar_type = 'r:*'
-
-                    tar_file = tarfile.open(archive_file_path, tar_type)
+                    try:
+                        tar_file = tarfile.open(archive_file_path, tar_type)
+                    except tarfile.ReadError:
+                        raise DeployException(
+                            "corrupted archive: also consider to download the "
+                            "archive manually, add its path to the url, run "
+                            "`./pype deploy`"
+                        )
                     tar_file.extractall(path)
                     tar_file.close()
 
@@ -600,7 +645,7 @@ class Deployment(object):
         for pitem in deploy.get('pip'):
             term.echo(" -- processing [ {} ]".format(pitem))
             try:
-                out = subprocess.check_output(
+                subprocess.check_output(
                     [sys.executable, '-m', 'pip', 'install', pitem])
             except subprocess.CalledProcessError as e:
                 raise DeployException(
@@ -610,7 +655,7 @@ class Deployment(object):
         # TODO(antirotor): This should be removed later as no changes
         # in requirements.txt should be made automatically. For that,
         # use `pype update-requirements` command
-        
+
         # term.echo(">>> Updating requirements ...")
         # try:
         #     out = subprocess.check_output(
@@ -679,7 +724,47 @@ class Deployment(object):
         deploy = self._read_deployment_file(settings)
 
         files = deploy.get("init_env")
-        config_path = deploy.get('PYPE_CONFIG').format(
-            PYPE_ROOT=self._pype_root)
+        config_path = os.path.normpath(
+            deploy.get('PYPE_CONFIG').format(
+                PYPE_ROOT=self._pype_root))
 
         return files, config_path
+
+    def calculate_checksum(self, fname):
+        """
+        Return md5 hex checksum of file
+
+        :param fname: file name
+        :type fname: str
+        :returns: md5 checkum hex encoded
+        :rtype: str
+        """
+        blocksize = 1 << 16  # 64kB
+        md5 = hashlib.md5()
+        with open(fname, 'rb') as f:
+            while True:
+                block = f.read(blocksize)
+                if not block:
+                    break
+                md5.update(block)
+        return md5.hexdigest()
+
+    def localize_package(self, path):
+        """
+        Copy package directory to pype environment "localized" folder.
+        Useful for storing binaries that are not accessible when calling over
+        UNC paths or similar scenarios.
+
+        :param path: source
+        :type path: str
+        """
+        package_name = path.split(os.path.sep)[-1]
+        destination = os.path.join(
+            os.environ.get("PYPE_ENV"),
+            "localized", package_name)
+        if os.path.isdir(destination):
+            term = Terminal()
+            term.echo("*** destination already exists "
+                      "[ {} ], removing".format(destination))
+            shutil.rmtree(destination)
+        shutil.copytree(path, destination)

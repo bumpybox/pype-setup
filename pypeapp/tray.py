@@ -1,10 +1,26 @@
 import os
 import sys
-import time
 from pypeapp import style, Logger
 from Qt import QtCore, QtGui, QtWidgets, QtSvg
 from pypeapp.lib.config import get_presets
 from pypeapp.resources import get_resource
+try:
+    import configparser
+except Exception:
+    import ConfigParser as configparser
+
+IS_DEV = False
+cur_dir = os.path.dirname(os.path.abspath(__file__))
+config_file_path = os.path.join(cur_dir, "config.ini")
+if os.path.exists(config_file_path):
+    config = configparser.ConfigParser()
+    config.read(config_file_path)
+    try:
+        value = config["DEFAULT"]["dev"]
+        if value.lower() == "true":
+            IS_DEV = True
+    except KeyError:
+        pass
 
 
 class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
@@ -14,7 +30,12 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
     :type parent: QtWidgets.QMainWindow
     """
     def __init__(self, parent):
-        self.icon = QtGui.QIcon(get_resource('icon.png'))
+        if IS_DEV:
+            icon_file_name = "icon_dev.png"
+        else:
+            icon_file_name = "icon.png"
+
+        self.icon = QtGui.QIcon(get_resource(icon_file_name))
 
         QtWidgets.QSystemTrayIcon.__init__(self, self.icon, parent)
 
@@ -46,6 +67,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         - Icon won't stay in tray after exit.
         """
         self.hide()
+        self.tray_man.on_exit()
         QtCore.QCoreApplication.exit()
 
 
@@ -59,7 +81,7 @@ class TrayManager:
     services_submenu = None
 
     errors = []
-    items = get_presets().get('tray', {}).get('menu_items', [])
+    items = get_presets(first_run=True).get('tray', {}).get('menu_items', [])
     available_sourcetypes = ['python', 'file']
 
     def __init__(self, tray_widget, main_window):
@@ -74,18 +96,69 @@ class TrayManager:
         self.services_thread = None
 
     def process_presets(self):
-        """Start up method for TrayManager
+        """Add modules to tray by presets.
+
+        This is start up method for TrayManager. Loads presets and import
+        modules described in "menu_items.json". In `item_usage` key you can
+        specify by item's title or import path if you want to import it.
+        Example of "menu_items.json" file:
+            {
+                "item_usage": {
+                    "Statics Server": false
+                }
+            }, {
+                "item_import": [{
+                    "title": "Ftrack",
+                    "type": "module",
+                    "import_path": "pype.ftrack.tray",
+                    "fromlist": ["pype", "ftrack"]
+                }, {
+                    "title": "Statics Server",
+                    "type": "module",
+                    "import_path": "pype.services.statics_server",
+                    "fromlist": ["pype","services"]
+                }]
+            }
+        In this case `Statics Server` won't be used.
         """
-        self.process_items(self.items, self.tray_widget.menu)
+        # Backwards compatible presets loading
+        if isinstance(self.items, list):
+            items = self.items
+        else:
+            items = []
+            # Get booleans is module should be used
+            usages = self.items.get("item_usage") or {}
+            for item in self.items.get("item_import", []):
+                import_path = item.get("import_path")
+                title = item.get("title")
+
+                item_usage = usages.get(title)
+                if item_usage is None:
+                    item_usage = usages.get(import_path, True)
+
+                if item_usage:
+                    items.append(item)
+                else:
+                    if not title:
+                        title = import_path
+                    self.log.debug("{} - Module ignored".format(title))
+
+        if items:
+            self.process_items(items, self.tray_widget.menu)
+
         # Add services if they are
         if self.services_submenu is not None:
             self.tray_widget.menu.addMenu(self.services_submenu)
+
         # Add separator
-        self.add_separator(self.tray_widget.menu)
+        if items and self.services_submenu is not None:
+            self.add_separator(self.tray_widget.menu)
+
         # Add Exit action to menu
         aExit = QtWidgets.QAction("&Exit", self.tray_widget)
         aExit.triggered.connect(self.tray_widget.exit)
         self.tray_widget.menu.addAction(aExit)
+
         # Tell each module which modules were imported
         self.connect_modules()
         self.start_modules()
@@ -175,7 +248,8 @@ class TrayManager:
             action.setIcon(self.icon_failed)
             self.services_submenu.addAction(action)
             self.log.warning(
-                "{} - Module import Error: {}".format(title, str(ie))
+                "{} - Module import Error: {}".format(title, str(ie)),
+                exc_info=True
             )
             return False
         return True
@@ -301,6 +375,16 @@ class TrayManager:
             if hasattr(obj, 'tray_start'):
                 obj.tray_start()
 
+    def on_exit(self):
+        for obj in self.modules.values():
+            if hasattr(obj, 'tray_exit'):
+                try:
+                    obj.tray_exit()
+                except Exception:
+                    self.log.error("Failed to exit module {}".format(
+                        obj.__class__.__name__
+                    ))
+
 
 class TrayMainWindow(QtWidgets.QMainWindow):
     """ TrayMainWindow is base of Pype application.
@@ -419,7 +503,11 @@ class Application(QtWidgets.QApplication):
         self.splash.hide()
 
     def set_splash(self):
-        splash_pix = QtGui.QPixmap(get_resource('splash.png'))
+        if IS_DEV:
+            splash_file_name = "splash_dev.png"
+        else:
+            splash_file_name = "splash.png"
+        splash_pix = QtGui.QPixmap(get_resource(splash_file_name))
         self.splash = QtWidgets.QSplashScreen(splash_pix)
         self.splash.setMask(splash_pix.mask())
         self.splash.setEnabled(False)

@@ -1,45 +1,40 @@
 {
 	"PYPE_CONFIG": "{PYPE_ROOT}/repos/pype-config",
-  "init_env": ["global", "avalon", "ftrack", "deadline"],
+  "init_env": ["global", "avalon", "ftrack", "deadline", "clockify"],
   "repositories": [{
       "name": "avalon-core",
-      "url": "git@github.com:pypeclub/avalon-core.git",
-      "branch": "develop"
+      "url": "https://github.com/pypeclub/avalon-core.git",
+      "branch": "2.7.0-pype"
     },
     {
       "name": "avalon-launcher",
-      "url": "git@github.com:pypeclub/avalon-launcher.git",
+      "url": "https://github.com/pypeclub/avalon-launcher.git",
       "branch": "develop"
     },
     {
       "name": "pyblish-base",
-      "url": "git@github.com:pypeclub/pyblish-base.git",
-      "branch": "develop"
-    },
-    {
-      "name": "pyblish-lite",
-      "url": "git@github.com:pypeclub/pyblish-lite.git",
+      "url": "https://github.com/pyblish/pyblish-base.git",
       "branch": "master"
     },
     {
-      "name": "pyblish-qml",
-      "url": "https://github.com/pyblish/pyblish-qml.git",
+      "name": "pyblish-lite",
+      "url": "https://github.com/pypeclub/pyblish-lite.git",
       "branch": "master"
     },
     {
       "name": "maya-look-assigner",
-      "url": "git@github.com:pypeclub/maya-look-assigner.git",
+      "url": "https://github.com/pypeclub/maya-look-assigner.git",
       "branch": "master"
     },
     {
       "name": "pype",
-      "url": "git@bitbucket.org:pypeclub/pype.git",
-      "branch": "develop"
+      "url": "https://github.com/pypeclub/pype.git",
+      "tag": "2.7.0"
     },
     {
       "name": "pype-config",
-      "url": "git@bitbucket.org:pypeclub/pype-config.git",
-      "branch": "develop"
+      "url": "https://github.com/pypeclub/pype-config.git",
+      "tag": "2.7.0"
     }
   ],
   "pip": [

@@ -1,23 +1,40 @@
+"""
+Logging to console and to mongo. For mongo logging, you need to set either
+``PYPE_LOG_MONGO_URL`` to something like:
+
+.. example::
+   mongo://user:password@hostname:port/database/collection?authSource=avalon
+
+or set ``PYPE_LOG_MONGO_HOST`` and other variables.
+See :func:`_mongo_settings`
+
+Best place for it is in ``repos/pype-config/environments/global.json``
+"""
+
+
 import logging
 import os
+import sys
 import datetime
 import time
 import datetime as dt
 import platform
 import getpass
+import socket
+try:
+    from urllib.parse import urlparse, parse_qs
+except ImportError:
+    from urlparse import urlparse, parse_qs
 
 try:
     from log4mongo.handlers import MongoHandler
 except ImportError:
-    _mongo_logging = False
-except NameError:
     _mongo_logging = False
 else:
     _mongo_logging = True
 
 from logging.handlers import TimedRotatingFileHandler
 from pypeapp.lib.Terminal import Terminal
-
 
 try:
     unicode
@@ -28,6 +45,70 @@ except NameError:
 
 PYPE_DEBUG = int(os.getenv("PYPE_DEBUG", "0"))
 
+if _mongo_logging:
+    from bson.objectid import ObjectId
+    MONGO_PROCESS_ID = ObjectId()
+
+system_name, pc_name = platform.uname()[:2]
+host_name = socket.gethostname()
+host_id = socket.gethostbyname(host_name)
+
+# Get process name
+if len(sys.argv) > 0 and os.path.basename(sys.argv[0]) == "tray.py":
+    process_name = "Tray"
+else:
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        process_name = process.name()
+
+    except ImportError:
+        process_name = os.environ.get("AVALON_APP_NAME")
+        if not process_name:
+            process_name = os.path.basename(sys.executable)
+
+
+def _mongo_settings():
+    host = None
+    port = None
+    username = None
+    password = None
+    collection = None
+    database = None
+    auth_db = ""
+
+    if os.environ.get('PYPE_LOG_MONGO_URL'):
+        result = urlparse(os.environ.get('PYPE_LOG_MONGO_URL'))
+
+        host = result.hostname
+        try:
+            port = result.port
+        except ValueError:
+            raise RuntimeError("invalid port specified")
+        username = result.username
+        password = result.password
+        try:
+            database = result.path.lstrip("/").split("/")[0]
+            collection = result.path.lstrip("/").split("/")[1]
+        except IndexError:
+            if not database:
+                raise RuntimeError("missing database name for logging")
+        try:
+            auth_db = parse_qs(result.query)['authSource'][0]
+        except KeyError:
+            # no auth db provided, mongo will use the one we are connecting to
+            pass
+    else:
+        host = os.environ.get('PYPE_LOG_MONGO_HOST')
+        port = int(os.environ.get('PYPE_LOG_MONGO_PORT', "0"))
+        database = os.environ.get('PYPE_LOG_MONGO_DB')
+        username = os.environ.get('PYPE_LOG_MONGO_USER')
+        password = os.environ.get('PYPE_LOG_MONGO_PASSWORD')
+        collection = os.environ.get('PYPE_LOG_MONGO_COL')
+        auth_db = os.environ.get('PYPE_LOG_MONGO_AUTH_DB', 'avalon')
+
+    return host, port, database, username, password, collection, auth_db
+
 
 def _bootstrap_mongo_log():
     """
@@ -35,20 +116,31 @@ def _bootstrap_mongo_log():
     """
     import pymongo
 
-    host = os.environ.get('PYPE_LOG_MONGO_HOST')
-    port = int(os.environ.get('PYPE_LOG_MONGO_PORT', "0"))
-    database = os.environ.get('PYPE_LOG_MONGO_DB')
-    collection = os.environ.get('PYPE_LOG_MONGO_COL')
+    host, port, database, username, password, collection, auth_db = _mongo_settings()
 
     if not host or not port or not database or not collection:
         # fail silently
         return
 
-    print(">>> connecting to log [ {}:{} ]".format(host, port))
-    client = pymongo.MongoClient(
-        host=[host], port=port)
+    user_pass = ""
+    if username and password:
+        user_pass = "{}:{}@".format(username, password)
 
-    # dblist = client.list_database_names()
+    socket_path = "{}:{}".format(host, port)
+
+    dab = ""
+    if database:
+        dab = "/{}".format(database)
+
+    auth = ""
+    if auth_db:
+        auth = "?authSource={}".format(auth_db)
+
+    uri = "mongodb://{}{}{}{}".format(user_pass, socket_path, dab, auth)
+
+    print(">>> connecting to log [ {} ]".format(uri))
+
+    client = pymongo.MongoClient(uri)
 
     logdb = client[database]
 
@@ -56,6 +148,7 @@ def _bootstrap_mongo_log():
     if collection not in collist:
         logdb.create_collection(collection, capped=True,
                                 max=5000, size=1073741824)
+    return logdb
 
 
 if _mongo_logging:
@@ -135,15 +228,21 @@ class PypeFormatter(logging.Formatter):
     def format(self, record):
         formatter = self.formatters.get(record.levelno, self.default_formatter)
 
+        _exc_info = record.exc_info
+        record.exc_info = None
+
         out = formatter.format(record)
+        record.exc_info = _exc_info
+
         if record.exc_info is not None:
             line_len = len(str(record.exc_info[1]))
-            out = "{}\n{}\n{}\n{}\n{}".format(out,
-                                              "-" * line_len,
-                                              str(record.exc_info[1]),
-                                              "=" * line_len,
-                                              self.formatException(
-                                                record.exc_info))
+            out = "{}\n{}\n{}\n{}\n{}".format(
+                out,
+                line_len * "=",
+                str(record.exc_info[1]),
+                line_len * "=",
+                self.formatException(record.exc_info)
+            )
         return out
 
 
@@ -156,7 +255,7 @@ class PypeMongoFormatter(logging.Formatter):
         """Formats LogRecord into python dictionary."""
         # Standard document
         document = {
-            'timestamp': dt.datetime.utcnow(),
+            'timestamp': dt.datetime.now(),
             'level': record.levelname,
             'thread': record.thread,
             'threadName': record.threadName,
@@ -166,8 +265,12 @@ class PypeMongoFormatter(logging.Formatter):
             'module': record.module,
             'method': record.funcName,
             'lineNumber': record.lineno,
-            'host': platform.node(),
-            'user': getpass.getuser()
+            'process_id': MONGO_PROCESS_ID,
+            'hostname': host_name,
+            'hostip': host_id,
+            'username': getpass.getuser(),
+            'system_name': system_name,
+            'process_name': process_name
         }
         # Standard document decorated with exception info
         if record.exc_info is not None:
@@ -274,9 +377,12 @@ class PypeLogger:
 
         if len(logger.handlers) > 0:
             for handler in logger.handlers:
-                if _mongo_logging and (not isinstance(handler, MongoHandler)
-                   and not isinstance(handler, PypeStreamHandler)):
-                    if os.environ.get('PYPE_LOG_MONGO_HOST'):  # noqa
+                if (
+                    _mongo_logging and
+                    not isinstance(handler, MongoHandler) and
+                    not isinstance(handler, PypeStreamHandler)
+                ):
+                    if os.environ.get('PYPE_LOG_MONGO_HOST') and _mongo_logging:  # noqa
                         logger.addHandler(self._get_mongo_handler())
                         pass
                     logger.addHandler(self._get_console_handler())

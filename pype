@@ -12,13 +12,13 @@
 # Print Pype ascii art :)
 art () {
   cat <<-EOF
- ____________  ____      ____  ____________  ____________
-/ \\           \\/\\   \\    /\\   \\/\\           \\/\\           \\
-\\  \\      ---  \\ \\   \\___\\_\\   \\ \\      ---  \\ \\     ------\\
- \\  \\     _____/  \\____     ____\\ \\     _____/  \\    \\___\\
-  \\  \\    \\__/  \\____/ \\    \\__/\\  \\    \\__/  \\  \\    -------\\
-   \\  \\____\\         \\  \\____\\   \\  \\____\\     \\  \\___________\\
-    \\/____/           \\/____/     \\/____/       \\/___________/
+ ____________
+/\\           \\
+\\ \\      ---  \\
+ \\ \\     _____/ ______
+  \\ \\    \\___/ /\\     \\
+   \\ \\____\\    \\ \\_____\\
+    \\/____/     \\/_____/   PYPE Club .
 
 EOF
 }
@@ -29,7 +29,7 @@ THIS=`readlink -f "${BASH_SOURCE[0]}" 2>/dev/null||echo $0`
 DIR=`dirname "${THIS}"`
 pushd $DIR > /dev/null
 # Set python interpreter name
-PYTHON="python"
+PYTHON="python3"
 # Set path to environment if not set
 export PYPE_ENV=${PYPE_ENV:="/opt/pype/pype_env2"}
 # Set debug level if not set
@@ -45,7 +45,8 @@ f_validate=0
 f_force=0
 f_mongodb=0
 f_update=0
-
+f_clean=0
+venv_activated=0
 # Process arguments
 # .
 
@@ -83,6 +84,9 @@ while :; do
     update-requirements)
       f_update=1
       ;;
+    clean)
+      f_clean=1
+      ;;
     --)
       shift
       break
@@ -112,9 +116,12 @@ export PATH=${PATH:="$PYPE_ROOT"}
 if [[ ":$PATH:" != *":$PYPE_ROOT:"* ]]; then
   export PATH="$PYPE_ROOT:$PATH"
 fi
+export PATH="$PYPE_ROOT/vendor/bin/ffmpeg_exec/linux/bin:$PATH"
 
 # Load colors definitions for easy output coloring
-source "$PYPE_ROOT/pypeapp/colors.sh"
+if [[ -z $PYPE_LOG_NO_COLORS ]]; then
+  source "$PYPE_ROOT/pypeapp/colors.sh"
+fi
 
 ###############################################################################
 # Display spinner for running job. Job must be running in a background.
@@ -129,21 +136,24 @@ source "$PYPE_ROOT/pypeapp/colors.sh"
 #   None
 ###############################################################################
 spinner () {
-  local pid=$! # Process Id of the previous running command
-  local spin='-\|/'
-  local i=0
-  while kill -0 $pid 2>/dev/null
-  do
-    i=$(( (i+1) %4 ))
-    printf "\r${spin:$i:1}"
-    sleep .1
-  done
+  local pid=$!
+   local delay=0.75
+   local spinstr='|/-\'
+   while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+       local temp=${spinstr#?}
+       printf " [%c]  " "$spinstr"
+       local spinstr=$temp${spinstr%"$temp"}
+       sleep $delay
+       printf "\b\b\b\b\b\b"
+   done
+   printf "    \b\b\b\b"
 }
 
 ###############################################################################
 # Activate virtual environment
 # Globals:
 #   colors
+#   venv_activated
 # Arguments:
 #   environment
 # Returns:
@@ -155,6 +165,25 @@ activate_venv () {
   if [ $? -ne 0 ] ; then
     echo -e "${BIRed}!!!${RST} Failed to activate."
     return 1
+  fi
+  venv_activated=1
+}
+
+##############################################################################
+# Deactivate virtual environment
+# Globals:
+#   colors
+#   venv_activated
+# Arguments:
+#   None
+# Returns:
+#   None
+###############################################################################
+deactivate_venv () {
+  if [ $venv_activated -eq 1 ] ; then
+    echo -e "${BICyan}<--${RST} Deactivating environment [${BIWhite} $1 ${RST}]"
+    deactivate
+    venv_activated=0
   fi
 }
 
@@ -170,7 +199,7 @@ activate_venv () {
 ###############################################################################
 update_requirements () {
   echo -e "${BICyan}  -${RST} Updating requirements ..."
-  pip freeze > pypeapp/requirements.txt
+  pip3 freeze > pypeapp/requirements.txt
 }
 
 ##############################################################################
@@ -221,25 +250,40 @@ install_environment () {
 ###############################################################################
 check_environment () {
   echo -e "${IGreen}>>>${RST} Validating environment dependencies ... \c"
-  diff pypeapp/requirements.txt <(pip freeze) > /dev/null
+  $PYTHON "$PYPE_ROOT/pypeapp/requirements.py"
   if [ $? -ne 0 ] ; then
     echo -e "${BIYellow}FAILED${RST}"
     echo -e "${BIYellow}***${RST} Environment dependencies inconsistent, fixing ..."
+    test_offline
     if [ "$f_offline" -ne 1 ]; then
-      pip install -r "$PYPE_ROOT/pypeapp/requirements.txt"
+      pip3 install -r "$PYPE_ROOT/pypeapp/requirements.txt"
     else
-      pip install -r "$PYPE_ROOT/pypeapp/requirements.txt" -f "$PYPE_ROOT/vendor/packages"
+      pip3 install -r "$PYPE_ROOT/pypeapp/requirements.txt" --no-index --find-links "$PYPE_ROOT/vendor/packages"
     fi
+    if [ $? -ne 0 ] ; then
+      echo -e "${BIRed}!!!${RST} Installaton ${BIRed}FAILED${RST}"
+      return 1
+    fi
+    clean_pyc $PYPE_ENV
+    clean_pyc
   else
     echo -e "${BIGreen}OK${RST}"
   fi
 }
 
+##############################################################################
+# Upgrade pip
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   None
+###############################################################################
 upgrade_pip () {
   if [ "$f_offline" -ne 1 ] ; then
-    echo -e "${BIGreen}>>>${RST} Updating pip ... \c"
-    pip install --upgrade pip 2> /dev/null &
-    spinner
+    echo -e "${BIGreen}>>>${RST} Updating pip ..."
+    pip3 install --upgrade pip 2> /dev/null
   fi
 }
 
@@ -262,7 +306,7 @@ bootstrap_pype () {
 
     # install essential dependecies
     echo -e "${BICyan}  -${RST} Installing dependecies ..."
-    pip install -r "$PYPE_ROOT/pypeapp/requirements.txt"
+    pip3 install -r "$PYPE_ROOT/pypeapp/requirements.txt"
     if [ $? -ne 0 ] ; then
       echo -e "${BIRed}!!!${RST} Installaton ${BIRed}FAILED${RST}"
       return 1
@@ -270,7 +314,7 @@ bootstrap_pype () {
   else
     # in offline mode, install all from vendor
     echo -e "${BIGreen}>>>${RST} Offline installation ..."
-    pip install -r "$PYPE_ROOT/pypeapp/requirements.txt" --no-index --find-links vendor/packages
+    pip3 install -r "$PYPE_ROOT/pypeapp/requirements.txt" --no-index --find-links vendor/packages
     if [ $? -ne 0 ] ; then
       echo -e "${BIRed}!!! ${RST} Installation ${BIRed}FAILED${RST}"
       return 1
@@ -292,13 +336,13 @@ bootstrap_pype () {
 ###############################################################################
 deploy_pype () {
   if [ $f_help == 1 ] ; then
-    python -m pypeapp deploy --help
+    $PYTHON -m pypeapp deploy --help
     return 1
   fi
   if [ $f_force == 1 ] ; then
-    python -m pypeapp deploy --force
+    $PYTHON -m pypeapp deploy --force
   else
-    python -m pypeapp deploy
+    $PYTHON -m pypeapp deploy
   fi
   if [ $? -ne 0 ] ; then
     echo -e "${BIRed}!!!${RST} Deployment ${BIRed}FAILED${RST}"
@@ -320,10 +364,10 @@ deploy_pype () {
 ###############################################################################
 validate_pype () {
   if [ "$f_help" == 1 ] ; then
-    python -m pypeapp validate --help
+    $PYTHON -m pypeapp validate --help
     return 1
   fi
-  python -m pypeapp validate
+  $PYTHON -m pypeapp validate
   if [ $? -ne 0 ] ; then
     echo -e "${BIRed}!!! WARNING:${RST} Deployment is invalid."
     echo -e "${BIYellow}  *${RST} Contact your system administrator to resolve this issue."
@@ -363,10 +407,10 @@ detect_mongo () {
 ###############################################################################
 detect_python () {
   echo -e "${BIGreen}>>>${RST} looking for ${BIWhite}[ python ]${RST} ... \c"
-  command -v python >/dev/null 2>&1 || { echo -e "${BIRed}FAILED${RST}"; return 1; }
+  command -v $PYTHON >/dev/null 2>&1 || { echo -e "${BIRed}FAILED${RST}"; return 1; }
   # Parse version string
   local version_command="import sys;print('{0}.{1}'.format(sys.version_info[0], sys.version_info[1]))"
-  local python_version="$(python <<< ${version_command})"
+  local python_version="$($PYTHON <<< ${version_command})"
   oIFS="$IFS"
   IFS=.
   set -- $python_version
@@ -415,7 +459,7 @@ detect_git () {
 ###############################################################################
 test_offline () {
   echo -e "${BIGreen}>>>${RST} Testing if we are online ... \c"
-  ping -q -w1 -c1 google.com &> /dev/null || { echo -e "${BIYellow}OFFLINE${RST}"; $f_offline=1; return 1; }
+  ping -q -w1 -c1 8.8.8.8 &> /dev/null || { echo -e "${BIYellow}OFFLINE${RST}"; f_offline=1; return 1; }
   echo -e "${BIGreen}ONLINE${RST}"
 }
 
@@ -431,15 +475,44 @@ test_offline () {
 ###############################################################################
 download () {
   echo -e "${IGreen}>>>${RST} Downloading packages for offline installation ..."
-  python -m pip download -r "$PYPE_ROOT/pypeapp/requirements.txt" -d "$PYPE_ROOT/vendor/packages"
+  $PYTHON -m pip download -r "$PYPE_ROOT/pypeapp/requirements.txt" -d "$PYPE_ROOT/vendor/packages"
   if [ $? -ne 0 ] ; then
     echo -e "${BIYellow}!!!${RST} Download failed"
     return 1
   fi
-  echo -e "${ICyan}<--${RST} Deactivating environment ..."
-  deactivate 2>&1 > /dev/null
-  echo -e "${IPurple}xxx${RST} Terminating ..."
   return 0
+}
+
+##############################################################################
+# Copy vendor/bin to local pype env
+# Globals:
+#   PYPE_ENV
+#   PYPE_ROOT
+# Arguments:
+#   None
+# Returns:
+#   None
+###############################################################################
+localize_bin () {
+  echo -e "${IGreen}>>>${RST} Localizing [ ${BIWhite}vendor/bin${RST} ] ..."
+  mkdir -p $PYPE_ENV/localized
+  cp -aR $PYPE_ROOT/vendor/bin/* $PYPE_ENV/localized/
+}
+
+##############################################################################
+# Clean pyc files in specified directory
+# Globals:
+#   None
+# Arguments:
+#   Optional path to clean
+# Returns:
+#   None
+###############################################################################
+clean_pyc () {
+  path=${1:-$PYPE_ROOT}
+  echo -e "${IGreen}>>>${RST} Cleaning pyc at [ ${BIWhite}$path${RST} ] ... \c"
+  find . -name '*.py?' -delete
+  echo -e "${BIGreen}DONE${RST}"
 }
 
 # -----------------------------------------------------------------------------
@@ -449,6 +522,14 @@ download () {
 main () {
   art
   echo -e "${IGreen}***${RST} Welcome to ${BIWhite}Pype${RST}!"
+
+  # Clean pyc
+  if [ "$f_clean" == 1 ] ; then
+    clear_pyc
+    echo -e "${ICyan}<<<${RST} Terminating ${IWhite}Pype${RST} ..."
+    return 0
+  fi
+
   # Check invalid argument combination
   if [ "$f_deploy" == 1 ] ; then
     if [ "$f_offline" == 1 ] ; then
@@ -509,6 +590,7 @@ main () {
   else
     echo -e "${BIGreen}FOUND${RST} - [${BIWhite} $PYPE_ENV ${RST}]"
     activate_venv $PYPE_ENV || return 1
+    check_environment || return 1
   fi
 
   if [ "$f_install" == 1 ] ; then
@@ -519,7 +601,6 @@ main () {
   # Update
   if [ "$f_update" == 1 ] ; then
     update_requirements || return 1
-    deactivate
     return 0
   fi
 
@@ -536,6 +617,7 @@ main () {
     echo -e "${IGreen}>>>${RST} Validating ${BIWhite}Pype${RST} deployment ..."
     validate_pype || return 1
     echo -e "${BIGreen}>>>${RST} Deployment is ${BIGreen}OK${RST}"
+    return
   fi
 
   # Deploy
@@ -560,10 +642,9 @@ main () {
   fi
 
   echo -e "${IGreen}>>>${RST} Running ${IWhite}Pype${RST} ..."
-  python -m pypeapp $args
-  echo -e "${ICyan}<--${RST} Deactivating environment ..."
-  deactivate 2>&1 > /dev/null
+  $PYTHON -m pypeapp $args
   echo -e "${IPurple}xxx${RST} Finishing up. ${IWhite}Have a nice day!${RST}"
 }
 
 main "$args"
+deactivate_venv $PYPE_ENV
