@@ -6,7 +6,7 @@ from pypeLauncher import PypeLauncher
 try:
     import click
 except ImportError:
-    click_path = os.path.join(os.environ['PYPE_ROOT'],
+    click_path = os.path.join(os.environ['PYPE_SETUP_PATH'],
                               'vendor', 'python', 'click')
     sys.path.append(click_path)
     import click
@@ -140,6 +140,10 @@ def mongodb():
               help="store provided credentials")
 @click.option("--legacy", is_flag=True,
               help="run event server without mongo storing")
+@click.option("--clockify-api-key", envvar="CLOCKIFY_API_KEY",
+              help="Clockify API key.")
+@click.option("--clockify-workspace", envvar="CLOCKIFY_WORKSPACE",
+              help="Clockify workspace")
 def eventserver(debug,
                 ftrack_url,
                 ftrack_user,
@@ -147,7 +151,9 @@ def eventserver(debug,
                 ftrack_events_path,
                 no_stored_credentials,
                 store_credentials,
-                legacy):
+                legacy,
+                clockify_api_key,
+                clockify_workspace):
     """
     This command launches ftrack event server.
 
@@ -176,7 +182,7 @@ def eventserver(debug,
         args.append(ftrack_api_key)
 
     if ftrack_events_path:
-        args.append('-ftrackapikey')
+        args.append('-ftrackeventpaths')
         args.append(ftrack_events_path)
 
     if no_stored_credentials:
@@ -188,11 +194,19 @@ def eventserver(debug,
     if legacy:
         args.append('-legacy')
 
+    if clockify_api_key:
+        args.append('-clockifyapikey')
+        args.append(clockify_api_key)
+
+    if clockify_workspace:
+        args.append('-clockifyworkspace')
+        args.append(clockify_workspace)
+
     PypeLauncher().launch_eventservercli(args)
 
 
 @main.command()
-@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.argument("paths", nargs=-1)
 @click.option("-g", "--gui", is_flag=True, help="Run pyblish GUI")
 @click.option("-d", "--debug", is_flag=True, help="Print debug messages")
 def publish(gui, debug, paths):
